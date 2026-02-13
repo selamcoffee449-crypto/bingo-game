@@ -1,0 +1,5 @@
+TOKEN = "8528747417:AAEO6sdTMFuAl98Q3_QgV0CCduck1WZMMDQ"
+ADMIN_IDS = [6835994100]  # change to your telegram id
+
+TICKET_PRICE = 10
+ROUND_TIME = 60  # seconds
