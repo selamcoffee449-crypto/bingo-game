@@ -3,60 +3,104 @@ import random
 import asyncio
 import threading
 from flask import Flask
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
 TICKET_PRICE = 10
-DRAW_DELAY = 5   # seconds between numbers
+DRAW_DELAY = 5
 
-# PUT YOUR GROUP ID HERE
-GROUP_ID = -1001234567890   # change
 
-# ================= WEB SERVER =================
+# =========================
+# WEB SERVER (Railway alive)
+# =========================
 def run_web():
-    app = Flask(__name__)
+    web = Flask(__name__)
 
-    @app.route("/")
+    @web.route("/")
     def home():
         return "Bingo running!"
 
     port = int(os.environ.get("PORT", 3000))
-    app.run(host="0.0.0.0", port=port)
+    web.run(host="0.0.0.0", port=port)
 
-# ================= DATABASE (TEMP) =================
+
+# =========================
+# GLOBAL DATA
+# =========================
 wallet = {}
 players = {}
-current_numbers = []
+jackpot = 0
 game_running = False
+drawn_numbers = []
 
 
-# ================= CARD GENERATOR =================
+# =========================
+# CARD GENERATOR
+# =========================
 def generate_card():
-    nums = random.sample(range(1, 76), 24)
-    card = [nums[i:i+5] for i in range(0, 24, 5)]
-    card.insert(2, card[2][:2] + ["⭐"] + card[2][2:])
+    card = []
+    ranges = [
+        range(1, 16),
+        range(16, 31),
+        range(31, 46),
+        range(46, 61),
+        range(61, 76),
+    ]
+
+    for r in ranges:
+        card.append(random.sample(list(r), 5))
+
+    # rotate columns → rows
+    card = list(map(list, zip(*card)))
+    card[2][2] = "★"
     return card
 
 
 def format_card(card):
-    text = "B  I  N  G  O\n"
+    text = "B I N G O\n"
     for row in card:
-        text += " ".join(str(x).rjust(2) for x in row) + "\n"
+        text += " ".join(str(x) for x in row) + "\n"
     return text
 
 
-# ================= COMMANDS =================
+# =========================
+# WIN CHECK
+# =========================
+def check_win(card):
+    # rows
+    for row in card:
+        if all(n in drawn_numbers or n == "★" for n in row):
+            return True
+
+    # columns
+    for col in range(5):
+        if all(card[row][col] in drawn_numbers or card[row][col] == "★" for row in range(5)):
+            return True
+
+    # diagonals
+    if all(card[i][i] in drawn_numbers or card[i][i] == "★" for i in range(5)):
+        return True
+
+    if all(card[i][4-i] in drawn_numbers or card[i][4-i] == "★" for i in range(5)):
+        return True
+
+    return False
+
+
+# =========================
+# COMMANDS
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user.id
-    wallet.setdefault(user, 0)
-    await update.message.reply_text(f"Welcome!\nYour ID: {user}")
+    user = update.effective_user
+    wallet.setdefault(user.id, 0)
+    await update.message.reply_text(f"Welcome!\nYour ID: {user.id}")
 
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.id
-    await update.message.reply_text(f"Balance: {wallet.get(user,0)}")
+    await update.message.reply_text(f"Balance: {wallet.get(user, 0)}")
 
 
 async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -65,74 +109,84 @@ async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Added 100.")
 
 
-# buy ticket
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global players
-    user = update.effective_user.id
+    global jackpot
 
-    if wallet.get(user, 0) < TICKET_PRICE:
+    user = update.effective_user
+
+    if wallet.get(user.id, 0) < TICKET_PRICE:
         await update.message.reply_text("Not enough balance.")
         return
 
-    wallet[user] -= TICKET_PRICE
+    wallet[user.id] -= TICKET_PRICE
+    jackpot += TICKET_PRICE
+
     card = generate_card()
-    players[user] = card
+
+    players[user.id] = {
+        "name": user.first_name,
+        "card": card,
+    }
 
     await update.message.reply_text(
-        "🎟 Ticket purchased!\n\nYour card:\n" + format_card(card)
+        f"🎟 Ticket purchased!\n\nYour card:\n{format_card(card)}"
     )
 
 
-# ================= CHECK WIN =================
-def is_winner(card):
-    for row in card:
-        ok = True
-        for x in row:
-            if x == "⭐":
-                continue
-            if x not in current_numbers:
-                ok = False
-                break
-        if ok:
-            return True
-    return False
+# =========================
+# ROUND ENGINE
+# =========================
+async def run_round(context: ContextTypes.DEFAULT_TYPE):
+    global game_running, drawn_numbers, jackpot, players
 
-
-# ================= DRAW ENGINE =================
-async def draw_loop(app):
-    global current_numbers, game_running, players
-
-    game_running = True
-    current_numbers = []
+    chat_id = context.bot_data["chat"]
 
     numbers = list(range(1, 76))
     random.shuffle(numbers)
+    drawn_numbers = []
+    game_running = True
 
-    jackpot = len(players) * TICKET_PRICE
-
-    await app.bot.send_message(GROUP_ID, f"🎉 GAME STARTED\nPlayers: {len(players)}\nJackpot: {jackpot}")
+    await context.bot.send_message(chat_id, f"🎯 ROUND STARTED!\n💰 Jackpot: {jackpot}")
 
     for n in numbers:
-        current_numbers.append(n)
+        if not game_running:
+            break
 
-        await app.bot.send_message(GROUP_ID, f"Number: {n}")
+        drawn_numbers.append(n)
+        await context.bot.send_message(chat_id, f"🎱 Number: {n}")
 
-        # check winners
-        for user, card in players.items():
-            if is_winner(card):
-                wallet[user] = wallet.get(user, 0) + jackpot
-                await app.bot.send_message(GROUP_ID, f"🏆 Winner: {user}\nWon {jackpot}")
-                players = {}
-                game_running = False
-                return
+        winners = []
+
+        for uid, data in players.items():
+            if check_win(data["card"]):
+                winners.append(uid)
+
+        if winners:
+            prize_each = jackpot // len(winners)
+
+            for uid in winners:
+                wallet[uid] += prize_each
+                await context.bot.send_message(
+                    chat_id,
+                    f"🏆 {players[uid]['name']} wins {prize_each}!"
+                )
+
+            game_running = False
+            break
 
         await asyncio.sleep(DRAW_DELAY)
 
+    await context.bot.send_message(chat_id, "🔄 Round ended.")
+
+    # reset
     players = {}
+    jackpot = 0
+    drawn_numbers = []
+
+    await asyncio.sleep(10)
     game_running = False
 
 
-# admin start in group
 async def startround(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global game_running
 
@@ -140,14 +194,13 @@ async def startround(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Game already running.")
         return
 
-    if not players:
-        await update.message.reply_text("No players.")
-        return
-
-    asyncio.create_task(draw_loop(context.application))
+    context.bot_data["chat"] = update.effective_chat.id
+    asyncio.create_task(run_round(context))
 
 
-# ================= MAIN =================
+# =========================
+# MAIN
+# =========================
 def main():
     threading.Thread(target=run_web).start()
 
