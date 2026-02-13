@@ -9,10 +9,12 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 # CONFIG
 # =========================
 TOKEN = os.getenv("TOKEN")
+ADMIN_ID = 6835994100
 TICKET_PRICE = 10
 
+
 # =========================
-# WEB SERVER (RAILWAY NEEDS THIS)
+# WEB SERVER (RAILWAY)
 # =========================
 def run_web():
     web = Flask(__name__)
@@ -28,8 +30,8 @@ def run_web():
 # =========================
 # MEMORY
 # =========================
-wallet = {}     # user_id -> money
-players = {}    # user_id -> board
+wallet = {}
+players = {}
 
 
 # =========================
@@ -38,15 +40,15 @@ players = {}    # user_id -> board
 def generate_board():
     board = []
 
-    board.append(random.sample(range(1, 16), 5))       # B
-    board.append(random.sample(range(16, 31), 5))      # I
+    board.append(random.sample(range(1, 16), 5))
+    board.append(random.sample(range(16, 31), 5))
 
-    n = random.sample(range(31, 46), 5)                # N
+    n = random.sample(range(31, 46), 5)
     n[2] = "⭐"
     board.append(n)
 
-    board.append(random.sample(range(46, 61), 5))      # G
-    board.append(random.sample(range(61, 76), 5))      # O
+    board.append(random.sample(range(46, 61), 5))
+    board.append(random.sample(range(61, 76), 5))
 
     return board
 
@@ -62,7 +64,7 @@ def format_board(board):
 
 
 # =========================
-# COMMANDS
+# USER COMMANDS
 # =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.id
@@ -99,6 +101,25 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
+# ADMIN COMMAND
+# =========================
+async def addbalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Admin only.")
+        return
+
+    try:
+        user_id = int(context.args[0])
+        amount = int(context.args[1])
+    except:
+        await update.message.reply_text("Usage: /addbalance user_id amount")
+        return
+
+    wallet[user_id] = wallet.get(user_id, 0) + amount
+    await update.message.reply_text(f"Added {amount} to {user_id}.")
+
+
+# =========================
 # MAIN
 # =========================
 def main():
@@ -110,6 +131,7 @@ def main():
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("give", give))
     app.add_handler(CommandHandler("join", join))
+    app.add_handler(CommandHandler("addbalance", addbalance))
 
     print("Bot running...")
     app.run_polling()
