@@ -7,38 +7,36 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
+# ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
 TICKET_PRICE = 10
 DRAW_DELAY = 5
+MIN_PLAYERS = 2
+START_DELAY = 20
 
 
-# =========================
-# WEB SERVER (Railway alive)
-# =========================
+# ================= RAILWAY KEEP ALIVE =================
 def run_web():
-    web = Flask(__name__)
+    app = Flask(__name__)
 
-    @web.route("/")
+    @app.route("/")
     def home():
         return "Bingo running!"
 
     port = int(os.environ.get("PORT", 3000))
-    web.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port)
 
 
-# =========================
-# GLOBAL DATA
-# =========================
+# ================= GLOBAL DATA =================
 wallet = {}
 players = {}
 jackpot = 0
 game_running = False
 drawn_numbers = []
+start_task = None
 
 
-# =========================
-# CARD GENERATOR
-# =========================
+# ================= CARD =================
 def generate_card():
     card = []
     ranges = [
@@ -52,22 +50,12 @@ def generate_card():
     for r in ranges:
         card.append(random.sample(list(r), 5))
 
-    # rotate columns → rows
     card = list(map(list, zip(*card)))
     card[2][2] = "★"
     return card
 
 
-def format_card(card):
-    text = "B I N G O\n"
-    for row in card:
-        text += " ".join(str(x) for x in row) + "\n"
-    return text
-
-
-# =========================
-# WIN CHECK
-# =========================
+# ================= WIN CHECK =================
 def check_win(card):
     # rows
     for row in card:
@@ -89,9 +77,7 @@ def check_win(card):
     return False
 
 
-# =========================
-# COMMANDS
-# =========================
+# ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     wallet.setdefault(user.id, 0)
@@ -109,33 +95,62 @@ async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Added 100.")
 
 
+# ================= JOIN =================
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global jackpot
+    global jackpot, start_task
 
     user = update.effective_user
+
+    if game_running:
+        await update.message.reply_text("Round already running.")
+        return
 
     if wallet.get(user.id, 0) < TICKET_PRICE:
         await update.message.reply_text("Not enough balance.")
         return
 
+    if user.id in players:
+        await update.message.reply_text("Already joined.")
+        return
+
     wallet[user.id] -= TICKET_PRICE
     jackpot += TICKET_PRICE
 
-    card = generate_card()
-
     players[user.id] = {
         "name": user.first_name,
-        "card": card,
+        "card": generate_card()
     }
 
     await update.message.reply_text(
-        f"🎟 Ticket purchased!\n\nYour card:\n{format_card(card)}"
+        f"🎟 {user.first_name} joined!\n"
+        f"👥 Players: {len(players)}\n"
+        f"💰 Jackpot: {jackpot}"
     )
 
+    context.bot_data["chat"] = update.effective_chat.id
 
-# =========================
-# ROUND ENGINE
-# =========================
+    # auto countdown
+    if len(players) >= MIN_PLAYERS and start_task is None:
+        start_task = asyncio.create_task(countdown_start(context))
+
+
+# ================= COUNTDOWN =================
+async def countdown_start(context: ContextTypes.DEFAULT_TYPE):
+    global start_task
+
+    chat_id = context.bot_data["chat"]
+
+    for i in range(START_DELAY, 0, -5):
+        await context.bot.send_message(chat_id, f"⏳ Starting in {i} sec")
+        await asyncio.sleep(5)
+
+    await context.bot.send_message(chat_id, "🎯 ROUND STARTING!")
+    asyncio.create_task(run_round(context))
+
+    start_task = None
+
+
+# ================= ROUND ENGINE =================
 async def run_round(context: ContextTypes.DEFAULT_TYPE):
     global game_running, drawn_numbers, jackpot, players
 
@@ -143,17 +158,25 @@ async def run_round(context: ContextTypes.DEFAULT_TYPE):
 
     numbers = list(range(1, 76))
     random.shuffle(numbers)
+
     drawn_numbers = []
     game_running = True
 
-    await context.bot.send_message(chat_id, f"🎯 ROUND STARTED!\n💰 Jackpot: {jackpot}")
+    await context.bot.send_message(chat_id, f"🎯 ROUND STARTED\n💰 Jackpot: {jackpot}")
 
     for n in numbers:
         if not game_running:
             break
 
         drawn_numbers.append(n)
-        await context.bot.send_message(chat_id, f"🎱 Number: {n}")
+
+        draw_list = " ".join(str(x) for x in sorted(drawn_numbers))
+        left = 75 - len(drawn_numbers)
+
+        await context.bot.send_message(
+            chat_id,
+            f"🎱 New: {n}\n\n📋 {draw_list}\n⏳ Left: {left}"
+        )
 
         winners = []
 
@@ -168,7 +191,7 @@ async def run_round(context: ContextTypes.DEFAULT_TYPE):
                 wallet[uid] += prize_each
                 await context.bot.send_message(
                     chat_id,
-                    f"🏆 {players[uid]['name']} wins {prize_each}!"
+                    f"🏆 {players[uid]['name']} wins {prize_each}"
                 )
 
             game_running = False
@@ -178,7 +201,6 @@ async def run_round(context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(chat_id, "🔄 Round ended.")
 
-    # reset
     players = {}
     jackpot = 0
     drawn_numbers = []
@@ -187,20 +209,13 @@ async def run_round(context: ContextTypes.DEFAULT_TYPE):
     game_running = False
 
 
+# ================= MANUAL START =================
 async def startround(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global game_running
-
-    if game_running:
-        await update.message.reply_text("Game already running.")
-        return
-
     context.bot_data["chat"] = update.effective_chat.id
     asyncio.create_task(run_round(context))
 
 
-# =========================
-# MAIN
-# =========================
+# ================= MAIN =================
 def main():
     threading.Thread(target=run_web).start()
 
