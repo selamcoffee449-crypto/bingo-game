@@ -1,71 +1,79 @@
+import os
+import threading
+from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from config import TOKEN, ROUND_TIME
-import db
-import game
-import admin
-import asyncio
+
+# =========================
+# CONFIG
+# =========================
+TOKEN = os.getenv("TOKEN")  # from Railway
+TICKET_PRICE = 10
+
+# =========================
+# WEB SERVER FOR RAILWAY
+# =========================
+def run_web():
+    web = Flask(__name__)
+
+    @web.route("/")
+    def home():
+        return "Bingo bot is running!"
+
+    port = int(os.environ.get("PORT", 3000))
+    web.run(host="0.0.0.0", port=port)
 
 
-# /start
+# =========================
+# SIMPLE MEMORY DATABASE
+# =========================
+wallet = {}
+
+
+# =========================
+# COMMANDS
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.id
-    db.get_user(user)
+    wallet.setdefault(user, 0)
     await update.message.reply_text("Welcome to Bingo Bot!")
 
 
-# /balance
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.id
-    bal = db.get_balance(user)
-    await update.message.reply_text(f"Balance: {bal}")
+    await update.message.reply_text(f"Balance: {wallet.get(user, 0)}")
 
 
-# /join
+async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user.id
+    wallet[user] = wallet.get(user, 0) + 100
+    await update.message.reply_text("Added 100.")
+
+
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.id
-    ok, msg = game.join_game(user)
-    await update.message.reply_text(msg)
 
-
-# admin give money
-async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admin_id = update.effective_user.id
-
-    if len(context.args) != 2:
-        await update.message.reply_text("/give user_id amount")
+    if wallet.get(user, 0) < TICKET_PRICE:
+        await update.message.reply_text("Not enough balance.")
         return
 
-    target = int(context.args[0])
-    amount = int(context.args[1])
-
-    msg = admin.admin_add_balance(admin_id, target, amount)
-    await update.message.reply_text(msg)
+    wallet[user] -= TICKET_PRICE
+    await update.message.reply_text("Ticket purchased.")
 
 
-# automatic round
-async def auto_round(context: ContextTypes.DEFAULT_TYPE):
-    result = game.draw_winner()
-    if result:
-        winner, pot = result
-        try:
-            await context.bot.send_message(
-                winner, f"You won {pot}!"
-            )
-        except:
-            pass
-
-
+# =========================
+# MAIN
+# =========================
 def main():
+    # start Railway web server
+    threading.Thread(target=run_web).start()
+
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("balance", balance))
-    app.add_handler(CommandHandler("join", join))
     app.add_handler(CommandHandler("give", give))
-
-    # job queue instead of create_task
-    app.job_queue.run_repeating(auto_round, interval=ROUND_TIME, first=ROUND_TIME)
+    app.add_handler(CommandHandler("join", join))
 
     print("Bot running...")
     app.run_polling()
