@@ -14,7 +14,7 @@ TICKET_PRICE = 10
 DRAW_DELAY = 5
 MIN_PLAYERS = 2
 START_DELAY = 20
-
+ADMIN_PASSWORD = "1234"
 
 # ================= WEB SERVER =================
 def run_web():
