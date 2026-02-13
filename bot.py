@@ -7,8 +7,11 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 # =========================
 # CONFIG
 # =========================
-TOKEN = os.getenv("TOKEN")  # from Railway
+TOKEN = os.getenv("TOKEN")  # set in Railway variables
 TICKET_PRICE = 10
+
+# your telegram id here
+ADMIN_IDS = [6835994100]
 
 # =========================
 # WEB SERVER FOR RAILWAY
@@ -62,10 +65,31 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
+# ADMIN COMMAND
+# =========================
+async def addbalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sender = update.effective_user.id
+
+    if sender not in ADMIN_IDS:
+        await update.message.reply_text("Admin only.")
+        return
+
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /addbalance user_id amount")
+        return
+
+    user_id = int(context.args[0])
+    amount = int(context.args[1])
+
+    wallet[user_id] = wallet.get(user_id, 0) + amount
+    await update.message.reply_text(f"Added {amount} to {user_id}.")
+
+
+# =========================
 # MAIN
 # =========================
 def main():
-    # start Railway web server
+    # Railway needs a web server
     threading.Thread(target=run_web).start()
 
     app = ApplicationBuilder().token(TOKEN).build()
@@ -74,8 +98,8 @@ def main():
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("give", give))
     app.add_handler(CommandHandler("join", join))
-    from admin import add_balance
-application.add_handler(CommandHandler("addbalance", add_balance))
+    app.add_handler(CommandHandler("addbalance", addbalance))
+
     print("Bot running...")
     app.run_polling()
 
