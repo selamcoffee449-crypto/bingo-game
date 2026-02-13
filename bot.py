@@ -1,41 +1,43 @@
 import os
+import random
 import threading
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# =========================
-# CONFIG
-# =========================
-TOKEN = os.getenv("TOKEN")  # set in Railway variables
+TOKEN = os.getenv("TOKEN")
 TICKET_PRICE = 10
 
-# your telegram id here
-ADMIN_IDS = [6835994100]
+wallet = {}
+players = {}
 
-# =========================
-# WEB SERVER FOR RAILWAY
-# =========================
+# ---------------- WEB (for Railway) ----------------
 def run_web():
     web = Flask(__name__)
 
     @web.route("/")
     def home():
-        return "Bingo bot is running!"
+        return "Bingo running"
 
     port = int(os.environ.get("PORT", 3000))
     web.run(host="0.0.0.0", port=port)
 
 
-# =========================
-# SIMPLE MEMORY DATABASE
-# =========================
-wallet = {}
+# ---------------- BINGO BOARD ----------------
+def generate_board():
+    nums = random.sample(range(1, 76), 25)
+    nums[12] = "FREE"
+    return [nums[i:i+5] for i in range(0, 25, 5)]
 
 
-# =========================
-# COMMANDS
-# =========================
+def board_to_text(board):
+    text = ""
+    for row in board:
+        text += " ".join(str(x).rjust(2) for x in row) + "\n"
+    return text
+
+
+# ---------------- COMMANDS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.id
     wallet.setdefault(user, 0)
@@ -61,35 +63,27 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     wallet[user] -= TICKET_PRICE
+    players[user] = {
+        "board": generate_board(),
+        "marked": set()
+    }
+
     await update.message.reply_text("Ticket purchased.")
+    await update.message.reply_text(board_to_text(players[user]["board"]))
 
 
-# =========================
-# ADMIN COMMAND
-# =========================
-async def addbalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sender = update.effective_user.id
+async def board(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user.id
 
-    if sender not in ADMIN_IDS:
-        await update.message.reply_text("Admin only.")
+    if user not in players:
+        await update.message.reply_text("You are not in game.")
         return
 
-    if len(context.args) != 2:
-        await update.message.reply_text("Usage: /addbalance user_id amount")
-        return
-
-    user_id = int(context.args[0])
-    amount = int(context.args[1])
-
-    wallet[user_id] = wallet.get(user_id, 0) + amount
-    await update.message.reply_text(f"Added {amount} to {user_id}.")
+    await update.message.reply_text(board_to_text(players[user]["board"]))
 
 
-# =========================
-# MAIN
-# =========================
+# ---------------- MAIN ----------------
 def main():
-    # Railway needs a web server
     threading.Thread(target=run_web).start()
 
     app = ApplicationBuilder().token(TOKEN).build()
@@ -98,7 +92,7 @@ def main():
     app.add_handler(CommandHandler("balance", balance))
     app.add_handler(CommandHandler("give", give))
     app.add_handler(CommandHandler("join", join))
-    app.add_handler(CommandHandler("addbalance", addbalance))
+    app.add_handler(CommandHandler("board", board))
 
     print("Bot running...")
     app.run_polling()
