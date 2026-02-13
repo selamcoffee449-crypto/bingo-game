@@ -76,7 +76,6 @@ def main():
     app.add_handler(CommandHandler("join", join))
     from admin import add_balance
 application.add_handler(CommandHandler("addbalance", add_balance))
-
     print("Bot running...")
     app.run_polling()
 
