@@ -2,6 +2,7 @@ import os
 import random
 import asyncio
 import threading
+import sqlite3
 from flask import Flask
 
 from telegram import Update
@@ -15,7 +16,7 @@ MIN_PLAYERS = 2
 START_DELAY = 20
 
 
-# ================= RAILWAY KEEP ALIVE =================
+# ================= WEB SERVER =================
 def run_web():
     app = Flask(__name__)
 
@@ -27,8 +28,37 @@ def run_web():
     app.run(host="0.0.0.0", port=port)
 
 
-# ================= GLOBAL DATA =================
-wallet = {}
+# ================= DATABASE =================
+conn = sqlite3.connect("bingo.db", check_same_thread=False)
+cur = conn.cursor()
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    name TEXT,
+    balance INTEGER DEFAULT 0
+)
+""")
+conn.commit()
+
+
+def add_user(user_id, name):
+    cur.execute("INSERT OR IGNORE INTO users(user_id,name,balance) VALUES(?,?,0)", (user_id, name))
+    conn.commit()
+
+
+def get_balance(user_id):
+    cur.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    return row[0] if row else 0
+
+
+def add_balance(user_id, amount):
+    cur.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (amount, user_id))
+    conn.commit()
+
+
+# ================= GLOBAL GAME DATA =================
 players = {}
 jackpot = 0
 game_running = False
@@ -57,17 +87,14 @@ def generate_card():
 
 # ================= WIN CHECK =================
 def check_win(card):
-    # rows
     for row in card:
         if all(n in drawn_numbers or n == "★" for n in row):
             return True
 
-    # columns
     for col in range(5):
         if all(card[row][col] in drawn_numbers or card[row][col] == "★" for row in range(5)):
             return True
 
-    # diagonals
     if all(card[i][i] in drawn_numbers or card[i][i] == "★" for i in range(5)):
         return True
 
@@ -80,18 +107,18 @@ def check_win(card):
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    wallet.setdefault(user.id, 0)
-    await update.message.reply_text(f"Welcome!\nYour ID: {user.id}")
+    add_user(user.id, user.first_name)
+    await update.message.reply_text("Registered!")
 
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.id
-    await update.message.reply_text(f"Balance: {wallet.get(user, 0)}")
+    await update.message.reply_text(f"Balance: {get_balance(user)}")
 
 
 async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.id
-    wallet[user] = wallet.get(user, 0) + 100
+    add_balance(user, 100)
     await update.message.reply_text("Added 100.")
 
 
@@ -100,12 +127,13 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global jackpot, start_task
 
     user = update.effective_user
+    add_user(user.id, user.first_name)
 
     if game_running:
         await update.message.reply_text("Round already running.")
         return
 
-    if wallet.get(user.id, 0) < TICKET_PRICE:
+    if get_balance(user.id) < TICKET_PRICE:
         await update.message.reply_text("Not enough balance.")
         return
 
@@ -113,7 +141,7 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Already joined.")
         return
 
-    wallet[user.id] -= TICKET_PRICE
+    add_balance(user.id, -TICKET_PRICE)
     jackpot += TICKET_PRICE
 
     players[user.id] = {
@@ -129,7 +157,6 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.bot_data["chat"] = update.effective_chat.id
 
-    # auto countdown
     if len(players) >= MIN_PLAYERS and start_task is None:
         start_task = asyncio.create_task(countdown_start(context))
 
@@ -175,7 +202,7 @@ async def run_round(context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.send_message(
             chat_id,
-            f"🎱 New: {n}\n\n📋 {draw_list}\n⏳ Left: {left}"
+            f"🎱 New: {n}\n📋 {draw_list}\n⏳ Left: {left}"
         )
 
         winners = []
@@ -188,7 +215,7 @@ async def run_round(context: ContextTypes.DEFAULT_TYPE):
             prize_each = jackpot // len(winners)
 
             for uid in winners:
-                wallet[uid] += prize_each
+                add_balance(uid, prize_each)
                 await context.bot.send_message(
                     chat_id,
                     f"🏆 {players[uid]['name']} wins {prize_each}"
