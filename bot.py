@@ -3,7 +3,7 @@ import random
 import sqlite3
 import asyncio
 import threading
-from flask import Flask, request
+from flask import Flask, request, redirect
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -14,38 +14,37 @@ TOKEN = os.getenv("TOKEN")
 ADMIN_PASSWORD = "1234"
 
 TICKET_PRICE = 10
-DRAW_DELAY = 5  # seconds between numbers
+DRAW_DELAY = 4
 
 
-# ================= DATABASE =================
-conn = sqlite3.connect("bingo.db", check_same_thread=False)
-cur = conn.cursor()
+# ================= DATABASE INIT =================
+def init_db():
+    conn = sqlite3.connect("bingo.db")
+    cur = conn.cursor()
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users(
-    user_id INTEGER PRIMARY KEY,
-    name TEXT,
-    balance INTEGER DEFAULT 0
-)
-""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users(
+        user_id INTEGER PRIMARY KEY,
+        name TEXT,
+        balance INTEGER DEFAULT 0
+    )
+    """)
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS tickets(
-    user_id INTEGER,
-    numbers TEXT
-)
-""")
+    conn.commit()
+    conn.close()
 
-conn.commit()
+
+init_db()
 
 
 # ================= MEMORY =================
 game_running = False
 drawn_numbers = []
-players = {}  # user_id -> card
+players = {}
+group_chat_id = None
 
 
-# ================= BINGO CARD =================
+# ================= CARD =================
 def generate_card():
     nums = random.sample(range(1, 76), 25)
     nums[12] = "★"
@@ -60,68 +59,13 @@ def format_card(card):
     return text
 
 
-# ================= COMMANDS =================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    cur.execute("INSERT OR IGNORE INTO users(user_id,name,balance) VALUES(?,?,0)",
-                (user.id, user.first_name))
-    conn.commit()
-
-    await update.message.reply_text(f"Welcome!\nYour ID: {user.id}")
-
-
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user.id
-    cur.execute("SELECT balance FROM users WHERE user_id=?", (user,))
-    bal = cur.fetchone()
-
-    if bal:
-        await update.message.reply_text(f"Balance: {bal[0]}")
-
-
-async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user.id
-    cur.execute("UPDATE users SET balance = balance + 100 WHERE user_id=?", (user,))
-    conn.commit()
-    await update.message.reply_text("Added 100.")
-
-
-async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global players
-
-    user = update.effective_user.id
-
-    cur.execute("SELECT balance FROM users WHERE user_id=?", (user,))
-    bal = cur.fetchone()
-
-    if not bal or bal[0] < TICKET_PRICE:
-        await update.message.reply_text("Not enough balance.")
-        return
-
-    cur.execute("UPDATE users SET balance = balance - ? WHERE user_id=?",
-                (TICKET_PRICE, user))
-    conn.commit()
-
-    card = generate_card()
-    players[user] = card
-
-    cur.execute("INSERT INTO tickets VALUES(?,?)", (user, str(card)))
-    conn.commit()
-
-    await update.message.reply_text(
-        "🎟 Ticket purchased!\n\nYour card:\n" + format_card(card)
-    )
-
-
-# ================= CHECK WIN =================
+# ================= WIN CHECK =================
 def check_win(card):
-    # rows
     for i in range(5):
         row = card[i*5:(i+1)*5]
         if all(n == "★" or n in drawn_numbers for n in row):
             return True
 
-    # columns
     for i in range(5):
         col = [card[i+j*5] for j in range(5)]
         if all(n == "★" or n in drawn_numbers for n in col):
@@ -130,23 +74,90 @@ def check_win(card):
     return False
 
 
+# ================= COMMANDS =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    conn = sqlite3.connect("bingo.db")
+    cur = conn.cursor()
+
+    cur.execute(
+        "INSERT OR IGNORE INTO users(user_id,name,balance) VALUES(?,?,0)",
+        (user.id, user.first_name)
+    )
+
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(f"Welcome!\nYour ID: {user.id}")
+
+
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect("bingo.db")
+    cur = conn.cursor()
+
+    cur.execute("SELECT balance FROM users WHERE user_id=?", (update.effective_user.id,))
+    bal = cur.fetchone()
+
+    conn.close()
+
+    if bal:
+        await update.message.reply_text(f"Balance: {bal[0]}")
+
+
+async def give(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect("bingo.db")
+    cur = conn.cursor()
+
+    cur.execute("UPDATE users SET balance = balance + 100 WHERE user_id=?",
+                (update.effective_user.id,))
+
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text("Added 100.")
+
+
+async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global players, group_chat_id
+
+    user = update.effective_user.id
+    group_chat_id = update.effective_chat.id
+
+    conn = sqlite3.connect("bingo.db")
+    cur = conn.cursor()
+
+    cur.execute("SELECT balance FROM users WHERE user_id=?", (user,))
+    bal = cur.fetchone()
+
+    if not bal or bal[0] < TICKET_PRICE:
+        conn.close()
+        await update.message.reply_text("Not enough balance.")
+        return
+
+    cur.execute("UPDATE users SET balance = balance - ? WHERE user_id=?",
+                (TICKET_PRICE, user))
+
+    conn.commit()
+    conn.close()
+
+    card = generate_card()
+    players[user] = card
+
+    await update.message.reply_text(
+        "🎟 Ticket purchased!\n\n" + format_card(card)
+    )
+
+
 # ================= ROUND ENGINE =================
 async def run_round(app):
     global game_running, drawn_numbers, players
-
-    chat_id = list(players.keys())
-    if not chat_id:
-        game_running = False
-        return
 
     drawn_numbers = []
     numbers = list(range(1, 76))
     random.shuffle(numbers)
 
-    await app.bot.send_message(
-        chat_id=update_chat_id,
-        text="🎯 ROUND STARTED!"
-    )
+    await app.bot.send_message(group_chat_id, "🎯 ROUND STARTED!")
 
     for n in numbers:
         if not game_running:
@@ -154,10 +165,7 @@ async def run_round(app):
 
         drawn_numbers.append(n)
 
-        await app.bot.send_message(
-            chat_id=update_chat_id,
-            text=f"🎱 Number: {n}"
-        )
+        await app.bot.send_message(group_chat_id, f"🎱 {n}")
 
         winners = []
         for uid, card in players.items():
@@ -166,14 +174,20 @@ async def run_round(app):
 
         if winners:
             prize = 50
+
+            conn = sqlite3.connect("bingo.db")
+            cur = conn.cursor()
+
             for w in winners:
                 cur.execute("UPDATE users SET balance = balance + ? WHERE user_id=?",
                             (prize, w))
+
             conn.commit()
+            conn.close()
 
             await app.bot.send_message(
-                chat_id=update_chat_id,
-                text=f"🏆 Winners: {len(winners)} players!"
+                group_chat_id,
+                f"🏆 Winners: {len(winners)}"
             )
 
             break
@@ -184,46 +198,27 @@ async def run_round(app):
     game_running = False
 
 
-update_chat_id = None
-
-
 async def startround(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global game_running, update_chat_id
+    global game_running
 
     if game_running:
-        await update.message.reply_text("Game already running.")
+        await update.message.reply_text("Already running.")
         return
 
     if not players:
-        await update.message.reply_text("No players joined.")
+        await update.message.reply_text("No players.")
         return
 
-    update_chat_id = update.effective_chat.id
     game_running = True
-
     asyncio.create_task(run_round(context.application))
 
 
-# ================= ADMIN COMMAND =================
-async def addbalance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if len(args) != 2:
-        await update.message.reply_text("Usage: /addbalance user amount")
-        return
-
-    uid = int(args[0])
-    amount = int(args[1])
-
-    cur.execute("UPDATE users SET balance = balance + ? WHERE user_id=?",
-                (amount, uid))
-    conn.commit()
-
-    await update.message.reply_text("Balance updated.")
-
-
-# ================= WEBSITE =================
+# ================= ADMIN WEBSITE =================
 def run_web():
     app = Flask(__name__)
+
+    def check(pw):
+        return pw == ADMIN_PASSWORD
 
     @app.route("/")
     def home():
@@ -232,28 +227,49 @@ def run_web():
     @app.route("/admin")
     def admin():
         pw = request.args.get("pw")
-        if pw != ADMIN_PASSWORD:
+        if not check(pw):
             return "Wrong password."
 
         return f"""
-        <h1>Bingo Admin</h1>
+        <h1>🎯 Bingo Admin</h1>
         <a href='/admin/users?pw={pw}'>Users</a><br>
+        <a href='/admin/stats?pw={pw}'>Stats</a><br>
         """
 
     @app.route("/admin/users")
     def users():
         pw = request.args.get("pw")
-        if pw != ADMIN_PASSWORD:
+        if not check(pw):
             return "Wrong password."
 
+        conn = sqlite3.connect("bingo.db")
+        cur = conn.cursor()
         cur.execute("SELECT user_id,name,balance FROM users")
         rows = cur.fetchall()
+        conn.close()
 
-        text = "<h1>Users</h1>"
+        text = f"<h1>Users</h1><a href='/admin?pw={pw}'>Back</a><br><br>"
         for u in rows:
-            text += f"{u[0]} | {u[1]} | {u[2]} <br>"
-
+            text += f"{u[0]} | {u[1]} | {u[2]}<br>"
         return text
+
+    @app.route("/admin/stats")
+    def stats():
+        pw = request.args.get("pw")
+        if not check(pw):
+            return "Wrong password."
+
+        conn = sqlite3.connect("bingo.db")
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users")
+        users = cur.fetchone()[0]
+        conn.close()
+
+        return f"""
+        <h1>Stats</h1>
+        Users: {users}<br>
+        <a href='/admin?pw={pw}'>Back</a>
+        """
 
     port = int(os.environ.get("PORT", 3000))
     app.run(host="0.0.0.0", port=port)
@@ -261,7 +277,7 @@ def run_web():
 
 # ================= MAIN =================
 def main():
-    threading.Thread(target=run_web).start()
+    threading.Thread(target=run_web, daemon=True).start()
 
     app = Application.builder().token(TOKEN).build()
 
@@ -270,7 +286,6 @@ def main():
     app.add_handler(CommandHandler("give", give))
     app.add_handler(CommandHandler("join", join))
     app.add_handler(CommandHandler("startround", startround))
-    app.add_handler(CommandHandler("addbalance", addbalance))
 
     print("Bot running...")
     app.run_polling()
