@@ -4,7 +4,7 @@ import sqlite3
 import threading
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
+from db import conn, cur, add_user, get_balance
 # ==================================================
 # SETTINGS
 # ==================================================
