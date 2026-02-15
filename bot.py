@@ -17,7 +17,7 @@ current_number = None
 # ==================================================
 # DATABASE
 # ==================================================
-conn = sqlite3.connect("bingo.db", check_same_thread=False)
+conn = sqlite3.connect("bingo_v2.db", check_same_thread=False)
 cur = conn.cursor()
 
 cur.execute("""
