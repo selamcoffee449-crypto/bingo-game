@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 # ==================================================
 # SETTINGS
 # ==================================================
-TOKEN = os.getenv("8496790065:AAFJ7He8QfKDr9XsCf47BGvzx_bgCCBdemE")  # put in Railway variables
+TOKEN = os.getenv("BOT_TOKEN")  # put in Railway variables
 ADMIN_PASSWORD = "1234"
 
 game_running = False
